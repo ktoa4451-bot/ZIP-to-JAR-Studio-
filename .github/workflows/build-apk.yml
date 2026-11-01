@@ -27,13 +27,19 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
-      - name: Install Android SDK
+      - name: Install Android SDK components
+        shell: bash
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Install Gradle 8.9
+        shell: bash
         run: |
           curl -fsSL \
             https://services.gradle.org/distributions/gradle-8.9-bin.zip \
@@ -41,40 +47,55 @@ jobs:
           unzip -q /tmp/gradle.zip -d /tmp
           echo "/tmp/gradle-8.9/bin" >> "$GITHUB_PATH"
 
-      - name: Extract source ZIP
-        shell: bash
-        run: |
-          mkdir -p source
-          if [ -f "ZIP-JAR-Studio-HTML-APK-Source.zip" ]; then
-            unzip -q "ZIP-JAR-Studio-HTML-APK-Source.zip" -d source
-          else
-            echo "ERROR: ZIP-JAR-Studio-HTML-APK-Source.zip not found in repository root"
-            exit 1
-          fi
-
-      - name: Locate Android project
+      - name: Locate project
         id: project
         shell: bash
         run: |
-          FILE="$(find source -name settings.gradle.kts -print -quit)"
-          if [ -z "$FILE" ]; then
-            echo "ERROR: settings.gradle.kts not found in ZIP"
-            exit 1
+          if [ -f "settings.gradle.kts" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f "app/settings.gradle.kts" ]; then
+            echo "dir=app" >> "$GITHUB_OUTPUT"
+          else
+            FILE="$(find . -name settings.gradle.kts \
+              -not -path './.git/*' -print -quit)"
+            if [ -z "$FILE" ]; then
+              FILE="$(find . -name settings.gradle \
+                -not -path './.git/*' -print -quit)"
+            fi
+            if [ -z "$FILE" ]; then
+              echo "ERROR: Gradle settings file not found"
+              exit 1
+            fi
+            echo "dir=$(dirname "$FILE")" >> "$GITHUB_OUTPUT"
           fi
-          echo "dir=$(dirname "$FILE")" >> "$GITHUB_OUTPUT"
 
-      - name: Build APK
-        working-directory: source
+      - name: Build debug APK
+        working-directory: .
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
-          PROJECT_DIR="${{ steps.project.outputs.dir }}"
           cd "$PROJECT_DIR"
           gradle --no-daemon assembleDebug
+
+      - name: Find APK
+        id: apk
+        shell: bash
+        run: |
+          APK="$(find . -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print -quit)"
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated"
+            exit 1
+          fi
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "Found APK: $APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ZIP-JAR-Studio-APK
-          path: source/**/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
           retention-days: 7
           

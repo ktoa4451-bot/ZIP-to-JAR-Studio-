@@ -26,76 +26,99 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: ''
-
-      - name: Install Android SDK components
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
+          set -e
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+
+          SDKMANAGER="$(find "$SDK/cmdline-tools" \
+            -type f -name sdkmanager 2>/dev/null | head -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: Android sdkmanager not found"
+            exit 1
+          fi
+
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Install Gradle 8.9
+      - name: Extract project ZIP archives
         shell: bash
         run: |
-          curl -fsSL \
-            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
-            -o /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /tmp
-          echo "/tmp/gradle-8.9/bin" >> "$GITHUB_PATH"
+          set -e
+          mkdir -p extracted
 
-      - name: Locate project
+          while IFS= read -r -d '' archive; do
+            name="$(basename "$archive" .zip)"
+            destination="extracted/$name"
+
+            echo "Extracting: $archive"
+            mkdir -p "$destination"
+            unzip -oq "$archive" -d "$destination"
+          done < <(
+            find . \
+              -path './.git' -prune -o \
+              -path './.github' -prune -o \
+              -path './extracted' -prune -o \
+              -type f -iname '*.zip' -print0
+          )
+
+      - name: Locate Android project
         id: project
         shell: bash
         run: |
-          if [ -f "settings.gradle.kts" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          elif [ -f "app/settings.gradle.kts" ]; then
-            echo "dir=app" >> "$GITHUB_OUTPUT"
-          else
-            FILE="$(find . -name settings.gradle.kts \
-              -not -path './.git/*' -print -quit)"
-            if [ -z "$FILE" ]; then
-              FILE="$(find . -name settings.gradle \
-                -not -path './.git/*' -print -quit)"
-            fi
-            if [ -z "$FILE" ]; then
-              echo "ERROR: Gradle settings file not found"
-              exit 1
-            fi
-            echo "dir=$(dirname "$FILE")" >> "$GITHUB_OUTPUT"
-          fi
+          set -e
 
-      - name: Build debug APK
-        working-directory: .
-        env:
-          PROJECT_DIR: ${{ steps.project.outputs.dir }}
-        run: |
-          cd "$PROJECT_DIR"
-          gradle --no-daemon assembleDebug
-
-      - name: Find APK
-        id: apk
-        shell: bash
-        run: |
-          APK="$(find . -type f \
-            -path '*/build/outputs/apk/debug/*.apk' \
+          SETTINGS="$(find . \
+            -path './.git' -prune -o \
+            -path './.github' -prune -o \
+            -type f \
+            \( -name settings.gradle -o \
+               -name settings.gradle.kts \) \
             -print -quit)"
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK was not generated"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Gradle settings file not found."
+            echo "Upload the Android project files or its source ZIP."
+            echo "Repository files:"
+            find . -maxdepth 4 -type f | head -200
             exit 1
           fi
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-          echo "Found APK: $APK"
+
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Android project: $PROJECT_DIR"
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle" ] && \
+             [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            echo "ERROR: app/build.gradle(.kts) not found."
+            exit 1
+          fi
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -e
+          gradle --no-daemon --stacktrace assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ZIP-JAR-Studio-APK
-          path: ${{ steps.apk.outputs.path }}
+          path: |
+            **/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
           
